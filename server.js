@@ -1,13 +1,10 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import Groq from "groq-sdk";
-import multer from "multer";
-import mammoth from "mammoth";
-import { createRequire } from "module";
-
-const require = createRequire(import.meta.url);
-const pdfParse = require("pdf-parse");
+const express = require("express");
+const cors = require("cors");
+const dotenv = require("dotenv");
+const Groq = require("groq-sdk").default;
+const multer = require("multer");
+const mammoth = require("mammoth");
+const PDFParser = require("pdf2json");
 
 dotenv.config();
 
@@ -33,16 +30,24 @@ const MODELS = [
 async function callGroq(messages) {
   for (const model of MODELS) {
     try {
-      const res = await groq.chat.completions.create({
-        model,
-        messages,
-      });
+      const res = await groq.chat.completions.create({ model, messages });
       return res;
     } catch (err) {
       console.log(`Model failed: ${model} — ${err.message}`);
     }
   }
   throw new Error("All models failed");
+}
+
+function parsePDF(buffer) {
+  return new Promise((resolve, reject) => {
+    const pdfParser = new PDFParser(null, 1);
+    pdfParser.on("pdfParser_dataError", (err) => reject(err.parserError));
+    pdfParser.on("pdfParser_dataReady", () => {
+      resolve(pdfParser.getRawTextContent());
+    });
+    pdfParser.parseBuffer(buffer);
+  });
 }
 
 app.get("/", (req, res) => {
@@ -55,16 +60,13 @@ app.post("/evaluate", upload.single("file"), async (req, res) => {
     const file = req.file;
 
     if (!file || !job) {
-      return res.status(400).json({
-        error: "File and job description are required",
-      });
+      return res.status(400).json({ error: "File and job description are required" });
     }
 
     let cvText = "";
 
     if (file.mimetype === "application/pdf") {
-      const data = await pdfParse(file.buffer);
-      cvText = data.text;
+      cvText = await parsePDF(file.buffer);
     } else if (
       file.mimetype ===
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -72,15 +74,11 @@ app.post("/evaluate", upload.single("file"), async (req, res) => {
       const result = await mammoth.extractRawText({ buffer: file.buffer });
       cvText = result.value;
     } else {
-      return res.status(400).json({
-        error: "Only PDF or DOCX files are allowed",
-      });
+      return res.status(400).json({ error: "Only PDF or DOCX files are allowed" });
     }
 
     if (!cvText || cvText.trim().length === 0) {
-      return res.status(422).json({
-        error: "Could not extract text from the uploaded file",
-      });
+      return res.status(422).json({ error: "Could not extract text from the uploaded file" });
     }
 
     const evaluationPrompt = `
@@ -100,10 +98,7 @@ JOB DESCRIPTION:
 ${job}
 `;
 
-    const evalRes = await callGroq([
-      { role: "user", content: evaluationPrompt },
-    ]);
-
+    const evalRes = await callGroq([{ role: "user", content: evaluationPrompt }]);
     const evaluation = evalRes.choices[0]?.message?.content || "No response";
 
     const cvPrompt = `
@@ -122,28 +117,17 @@ JOB DESCRIPTION:
 ${job}
 `;
 
-    const cvRes = await callGroq([
-      { role: "user", content: cvPrompt },
-    ]);
-
+    const cvRes = await callGroq([{ role: "user", content: cvPrompt }]);
     const tailoredCV = cvRes.choices[0]?.message?.content || "No response";
 
-    res.json({
-      success: true,
-      evaluation,
-      tailoredCV,
-    });
+    res.json({ success: true, evaluation, tailoredCV });
   } catch (err) {
     console.error("ERROR:", err);
-    res.status(500).json({
-      success: false,
-      error: "Server error — check function logs",
-    });
+    res.status(500).json({ success: false, error: "Server error — check function logs" });
   }
 });
 
 const PORT = process.env.PORT || 3001;
-
 app.listen(PORT, () => {
   console.log(`CVPilot backend running on http://localhost:${PORT}`);
 });
